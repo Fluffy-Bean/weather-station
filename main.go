@@ -36,6 +36,7 @@ type ErrorResponse struct {
 
 func main() {
 	var err error
+
 	database, err = sql.Open("sqlite3", "./weather.db")
 	if err != nil {
 		log.Fatal(err)
@@ -47,7 +48,7 @@ func main() {
 	mux.HandleFunc("/", handleRoot)
 	mux.HandleFunc("/devices", handleDevices)
 
-	err = http.ListenAndServe("localhost:8080", mux)
+	err = http.ListenAndServe("0.0.0.0:8080", mux)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -127,7 +128,9 @@ func handleRootGet(writer http.ResponseWriter, request *http.Request) {
 
 	for rows.Next() {
 		err = rows.Scan(&id, &temperature, &humidity, &pressure)
-		handleError(writer, request, err)
+		if err != nil {
+			handleError(writer, request, err)
+		}
 		responseData = append(responseData, WeatherResponse{id, temperature, humidity, pressure})
 	}
 
@@ -145,18 +148,28 @@ func handleRootPost(writer http.ResponseWriter, request *http.Request) {
 		pressure    float64
 	)
 
-	temperature, err = strconv.ParseFloat(request.URL.Query().Get("temperature"), 64)
+	err = request.ParseForm()
 	if err != nil {
+		fmt.Println("Error parsing form")
 		handleError(writer, request, err)
 	}
-	humidity, err = strconv.ParseFloat(request.URL.Query().Get("humidity"), 64)
+
+	temperature, err = strconv.ParseFloat(request.FormValue("temperature"), 64)
 	if err != nil {
+		fmt.Println("Error parsing temperature" + request.FormValue("temperature") + " <---")
 		handleError(writer, request, err)
 	}
-	pressure, err = strconv.ParseFloat(request.URL.Query().Get("pressure"), 64)
+	humidity, err = strconv.ParseFloat(request.FormValue("humidity"), 64)
 	if err != nil {
+		fmt.Println("Error parsing humidity" + request.FormValue("humidity") + " <---")
 		handleError(writer, request, err)
 	}
+	pressure, err = strconv.ParseFloat(request.FormValue("pressure"), 64)
+	if err != nil {
+		fmt.Println("Error parsing pressure" + request.FormValue("pressure") + " <---")
+		handleError(writer, request, err)
+	}
+
 	statement, _ := database.Prepare("INSERT INTO weather (temperature, humidity, pressure) VALUES (?, ?, ?);")
 	_, err = statement.Exec(temperature, humidity, pressure)
 	if err != nil {
