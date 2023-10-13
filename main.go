@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	uuid4 "github.com/google/uuid" // Stupid way to avoid conflict
 	_ "github.com/mattn/go-sqlite3"
 	"log"
 	"net/http"
@@ -24,10 +25,12 @@ type WeatherResponse struct {
 type DeviceResponse struct {
 	Id       int
 	Name     string
-	LastSeen string
 	Address  string
 	Version  string
 	Location string
+}
+type DeviceLogin struct {
+	Uuid string
 }
 type ErrorResponse struct {
 	Message string
@@ -52,20 +55,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = database.Close()
-	if err != nil {
-		log.Fatal(err)
-	}
 }
 
 func CreateTables() {
-	fmt.Println("Creating tables...")
-	var (
-		statement *sql.Stmt
-		err       error
-	)
-
-	statement, err = database.Prepare("CREATE TABLE IF NOT EXISTS weather (id INTEGER PRIMARY KEY AUTOINCREMENT, temperature REAL, humidity REAL, pressure REAL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);")
+	statement, err := database.Prepare("CREATE TABLE IF NOT EXISTS weather (id INTEGER PRIMARY KEY AUTOINCREMENT, temperature REAL, humidity REAL, pressure REAL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -74,7 +67,7 @@ func CreateTables() {
 		log.Fatal(err)
 	}
 
-	statement, err = database.Prepare("CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, version TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);")
+	statement, err = database.Prepare("CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, address TEXT, version TEXT, uuid TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -106,30 +99,25 @@ func handleRoot(writer http.ResponseWriter, request *http.Request) {
 }
 
 func handleRootGet(writer http.ResponseWriter, request *http.Request) {
-	var (
-		err          error
-		statement    *sql.Stmt
-		rows         *sql.Rows
-		responseData []WeatherResponse
-		id           int
-		temperature  float64
-		humidity     float64
-		pressure     float64
-	)
+	statement, err := database.Prepare("SELECT id, temperature, humidity, pressure FROM weather ORDER BY created_at DESC;")
+	if err != nil {
+		handleError(writer, request, 500, "Internal server error")
+	}
+	rows, err := statement.Query()
+	if err != nil {
+		handleError(writer, request, 500, "Internal server error")
+	}
 
-	statement, err = database.Prepare("SELECT id, temperature, humidity, pressure FROM weather ORDER BY created_at DESC;")
-	if err != nil {
-		handleError(writer, request, err)
-	}
-	rows, err = statement.Query()
-	if err != nil {
-		handleError(writer, request, err)
-	}
+	var (
+		responseData                    []WeatherResponse
+		id                              int
+		temperature, humidity, pressure float64
+	)
 
 	for rows.Next() {
 		err = rows.Scan(&id, &temperature, &humidity, &pressure)
 		if err != nil {
-			handleError(writer, request, err)
+			handleError(writer, request, 500, "Internal server error")
 		}
 		responseData = append(responseData, WeatherResponse{id, temperature, humidity, pressure})
 	}
@@ -141,39 +129,69 @@ func handleRootGet(writer http.ResponseWriter, request *http.Request) {
 }
 
 func handleRootPost(writer http.ResponseWriter, request *http.Request) {
-	var (
-		err         error
-		temperature float64
-		humidity    float64
-		pressure    float64
-	)
-
-	err = request.ParseForm()
+	err := request.ParseForm()
 	if err != nil {
 		fmt.Println("Error parsing form")
-		handleError(writer, request, err)
+		handleError(writer, request, 500, "Internal server error")
 	}
 
-	temperature, err = strconv.ParseFloat(request.FormValue("temperature"), 64)
+	uuid := request.FormValue("uuid")
+
+	statement, err := database.Prepare("SELECT id FROM devices WHERE uuid = ? LIMIT 1;")
+	row, err := statement.Query(uuid)
 	if err != nil {
-		fmt.Println("Error parsing temperature" + request.FormValue("temperature") + " <---")
-		handleError(writer, request, err)
+		fmt.Println("Error checking if device exists")
+		handleError(writer, request, 500, "Error checking if device exists")
 	}
-	humidity, err = strconv.ParseFloat(request.FormValue("humidity"), 64)
-	if err != nil {
-		fmt.Println("Error parsing humidity" + request.FormValue("humidity") + " <---")
-		handleError(writer, request, err)
-	}
-	pressure, err = strconv.ParseFloat(request.FormValue("pressure"), 64)
-	if err != nil {
-		fmt.Println("Error parsing pressure" + request.FormValue("pressure") + " <---")
-		handleError(writer, request, err)
+	if !row.Next() {
+		fmt.Println("Device does not exist")
+		handleError(writer, request, 403, "You are not real")
 	}
 
-	statement, _ := database.Prepare("INSERT INTO weather (temperature, humidity, pressure) VALUES (?, ?, ?);")
+	err = statement.Close()
+	if err != nil {
+		fmt.Println("Error closing statement")
+		handleError(writer, request, 500, "Internal server error")
+	}
+	err = row.Close()
+	if err != nil {
+		fmt.Println("Error closing row")
+		handleError(writer, request, 500, "Internal server error")
+	}
+
+	temperature, err := strconv.ParseFloat(request.FormValue("temperature"), 64)
+	if err != nil {
+		fmt.Println("Error parsing temperature " + request.FormValue("temperature"))
+		handleError(writer, request, 500, "Internal server error")
+	}
+
+	humidity, err := strconv.ParseFloat(request.FormValue("humidity"), 64)
+	if err != nil {
+		fmt.Println("Error parsing humidity " + request.FormValue("humidity"))
+		handleError(writer, request, 500, "Internal server error")
+	}
+
+	pressure, err := strconv.ParseFloat(request.FormValue("pressure"), 64)
+	if err != nil {
+		fmt.Println("Error parsing pressure " + request.FormValue("pressure"))
+		handleError(writer, request, 500, "Internal server error")
+	}
+
+	statement, _ = database.Prepare("INSERT INTO weather (temperature, humidity, pressure) VALUES (?, ?, ?);")
 	_, err = statement.Exec(temperature, humidity, pressure)
 	if err != nil {
-		handleError(writer, request, err)
+		handleError(writer, request, 500, "Internal server error")
+	}
+
+	err = statement.Close()
+	if err != nil {
+		fmt.Println("Error closing statement")
+		handleError(writer, request, 500, "Internal server error")
+	}
+	err = row.Close()
+	if err != nil {
+		fmt.Println("Error closing row")
+		handleError(writer, request, 500, "Internal server error")
 	}
 
 	err = json.NewEncoder(writer).Encode(Response{WeatherResponse{0, temperature, humidity, pressure}})
@@ -192,6 +210,8 @@ func handleDevices(writer http.ResponseWriter, request *http.Request) {
 	switch request.Method {
 	case "GET":
 		handleDeviceGet(writer, request)
+	case "POST":
+		handleDevicePost(writer, request)
 	default:
 		writer.WriteHeader(http.StatusMethodNotAllowed)
 		err = json.NewEncoder(writer).Encode(Response{ErrorResponse{"Method not allowed", 405}})
@@ -202,29 +222,39 @@ func handleDevices(writer http.ResponseWriter, request *http.Request) {
 }
 
 func handleDeviceGet(writer http.ResponseWriter, request *http.Request) {
-	var (
-		err          error
-		responseData []DeviceResponse
-		id           int
-		name         string
-		version      string
-	)
-
-	statement, err := database.Prepare("SELECT id, name, version FROM devices;")
+	statement, err := database.Prepare("SELECT id, name, address, version FROM devices;")
 	if err != nil {
-		handleError(writer, request, err)
+		handleError(writer, request, 500, "Internal server error")
 	}
 	rows, err := statement.Query()
 	if err != nil {
-		handleError(writer, request, err)
+		handleError(writer, request, 500, "Internal server error")
 	}
 
+	var (
+		responseData           []DeviceResponse
+		id                     int
+		name, address, version string
+	)
+
 	for rows.Next() {
-		err = rows.Scan(&id, &name, &version)
+		err = rows.Scan(&id, &name, &address, &version)
 		if err != nil {
-			handleError(writer, request, err)
+			handleError(writer, request, 500, "Internal server error")
+			break
 		}
-		responseData = append(responseData, DeviceResponse{id, name, "1 hour ago", "192.168.0.69", "1.0.0", "Living room"})
+		responseData = append(responseData, DeviceResponse{id, name, address, version, "Living room"})
+	}
+
+	err = statement.Close()
+	if err != nil {
+		fmt.Println("Error closing statement")
+		handleError(writer, request, 500, "Internal server error")
+	}
+	err = rows.Close()
+	if err != nil {
+		fmt.Println("Error closing rows")
+		handleError(writer, request, 500, "Internal server error")
 	}
 
 	err = json.NewEncoder(writer).Encode(Response{responseData})
@@ -233,10 +263,61 @@ func handleDeviceGet(writer http.ResponseWriter, request *http.Request) {
 	}
 }
 
-func handleError(writer http.ResponseWriter, request *http.Request, err error) {
+func handleDevicePost(writer http.ResponseWriter, request *http.Request) {
+	err := request.ParseForm()
+	if err != nil {
+		fmt.Println("Error parsing form")
+		handleError(writer, request, 500, "Internal server error")
+	}
+
+	name := request.FormValue("name")
+	version := request.FormValue("version")
+	address := request.FormValue("address")
+
+	statement, err := database.Prepare("SELECT uuid FROM devices WHERE address = ? LIMIT 1;")
+	row, err := statement.Query(address)
+	if err != nil {
+		fmt.Println("Error checking if device exists")
+		handleError(writer, request, 500, "Error checking if device exists")
+	}
+
+	var uuid string
+
+	if row.Next() {
+		err = row.Scan(&uuid)
+		if err != nil {
+			handleError(writer, request, 500, "Internal server error")
+		}
+	} else {
+		uuid = uuid4.NewString()
+		statement, _ = database.Prepare("INSERT INTO devices (name, version, address, uuid) VALUES (?, ?, ?, ?);")
+		_, err = statement.Exec(name, version, address, uuid)
+		if err != nil {
+			handleError(writer, request, 500, "Internal server error")
+		}
+	}
+
+	err = statement.Close()
+	if err != nil {
+		fmt.Println("Error closing statement")
+		handleError(writer, request, 500, "Internal server error")
+	}
+	err = row.Close()
+	if err != nil {
+		fmt.Println("Error closing row")
+		handleError(writer, request, 500, "Internal server error")
+	}
+
+	err = json.NewEncoder(writer).Encode(Response{DeviceLogin{uuid}})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func handleError(writer http.ResponseWriter, request *http.Request, code int, message string) {
 	request.Header.Set("Content-Type", "application/json")
-	writer.WriteHeader(http.StatusInternalServerError)
-	err = json.NewEncoder(writer).Encode(Response{ErrorResponse{"Internal server error", 500}})
+	writer.WriteHeader(code)
+	err := json.NewEncoder(writer).Encode(Response{ErrorResponse{message, code}})
 	if err != nil {
 		log.Fatal(err)
 	}
