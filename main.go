@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"github.com/gin-gonic/gin"
-	uuid4 "github.com/google/uuid" // Stupid way to avoid conflict
 	_ "github.com/mattn/go-sqlite3"
 	"log"
 )
@@ -26,12 +25,12 @@ type WeatherForm struct {
 type DeviceResponse struct {
 	Id       int
 	Name     string
-	Address  string
-	Version  string
+	Config   string
 	Location string
 }
 type DeviceForm struct {
 	Name    string `form:"name" json:"name" binding:"required"`
+	Uuid    string `form:"uuid" json:"uuid" binding:"required"`
 	Version string `form:"version" json:"version" binding:"required"`
 	Address string `form:"address" json:"address" binding:"required"`
 }
@@ -54,7 +53,7 @@ func main() {
 	}
 
 	// Make Devices table
-	statement, err = database.Prepare("CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, address TEXT, version TEXT, uuid TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);")
+	statement, err = database.Prepare("CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT, name TEXT, config TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -127,7 +126,7 @@ func indexPost(c *gin.Context) {
 	}
 	if !row.Next() {
 		fmt.Println("Device does not exist" + form.Uuid)
-		c.JSON(403, gin.H{"error": "Device does not exist"})
+		c.JSON(403, gin.H{"error": "Device does not exist, check in first"})
 		return
 	}
 
@@ -150,7 +149,7 @@ func indexPost(c *gin.Context) {
 func devicesGet(c *gin.Context) {
 	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 
-	statement, err := database.Prepare("SELECT id, name, address, version FROM devices;")
+	statement, err := database.Prepare("SELECT id, name, config FROM devices;")
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Internal server error"})
 		return
@@ -162,18 +161,18 @@ func devicesGet(c *gin.Context) {
 	}
 
 	var (
-		responseData           []DeviceResponse
-		id                     int
-		name, address, version string
+		responseData []DeviceResponse
+		id           int
+		name, config string
 	)
 
 	for row.Next() {
-		err = row.Scan(&id, &name, &address, &version)
+		err = row.Scan(&id, &name, &config)
 		if err != nil {
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			break
 		}
-		responseData = append(responseData, DeviceResponse{id, name, address, version, "Living room"})
+		responseData = append(responseData, DeviceResponse{id, name, config, "Living room"})
 	}
 
 	_ = statement.Close()
@@ -191,26 +190,27 @@ func devicesPost(c *gin.Context) {
 		return
 	}
 
-	statement, err := database.Prepare("SELECT uuid FROM devices WHERE address = ? LIMIT 1;")
-	row, err := statement.Query(form.Address)
+	statement, err := database.Prepare("SELECT id FROM devices WHERE uuid = ? LIMIT 1;")
+	row, err := statement.Query(form.Uuid)
 	if err != nil {
 		fmt.Println("Error checking if device exists")
 		c.JSON(500, gin.H{"error": "Internal server error"})
 		return
 	}
 
-	var uuid string
 	if row.Next() {
-		err = row.Scan(&uuid)
+		var id int
+		err = row.Scan(&id)
 		if err != nil {
-			fmt.Println("Error scanning row")
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			return
 		}
 	} else {
-		uuid = uuid4.NewString()
-		statement, _ = database.Prepare("INSERT INTO devices (name, version, address, uuid) VALUES (?, ?, ?, ?);")
-		_, err = statement.Exec(form.Name, form.Version, form.Address, uuid)
+		// Todo: Use json encoder
+		config := fmt.Sprintf("{\"address\": \"%s\", \"version\": \"%s\"}", form.Address, form.Version)
+
+		statement, _ = database.Prepare("INSERT INTO devices (uuid, name, config) VALUES (?, ?, ?);")
+		_, err = statement.Exec(form.Uuid, form.Name, config)
 		if err != nil {
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			return
@@ -220,5 +220,5 @@ func devicesPost(c *gin.Context) {
 	_ = statement.Close()
 	_ = row.Close()
 
-	c.JSON(200, gin.H{"uuid": uuid})
+	c.JSON(200, ":3")
 }
