@@ -2,19 +2,21 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	_ "github.com/mattn/go-sqlite3"
 	"log"
+	"strconv"
 )
 
 var database *sql.DB
 
 type WeatherResponse struct {
-	Id          int
-	Temperature float64
-	Humidity    float64
-	Pressure    float64
+	Id          int     `json:"id"`
+	Temperature float64 `json:"temperature"`
+	Humidity    float64 `json:"humidity"`
+	Pressure    float64 `json:"pressure"`
 }
 type WeatherForm struct {
 	Uuid        string  `form:"uuid" json:"uuid" binding:"required"`
@@ -22,17 +24,27 @@ type WeatherForm struct {
 	Humidity    float64 `form:"humidity" json:"humidity" binding:"required"`
 	Pressure    float64 `form:"pressure" json:"pressure" binding:"required"`
 }
+
 type DeviceResponse struct {
-	Id       int
-	Name     string
-	Config   string
-	Location string
+	Id       int    `json:"id"`
+	Name     string `json:"name"`
+	Config   string `json:"config"`
+	Location string `json:"location"`
 }
-type DeviceForm struct {
-	Name    string `form:"name" json:"name" binding:"required"`
+type DeviceConfig struct {
+	Version string `json:"version"`
+	Address string `json:"address"`
+}
+type DevicePost struct {
 	Uuid    string `form:"uuid" json:"uuid" binding:"required"`
+	Name    string `form:"name" json:"name" binding:"required"`
 	Version string `form:"version" json:"version" binding:"required"`
 	Address string `form:"address" json:"address" binding:"required"`
+}
+type DevicePut struct {
+	Id       int    `form:"id" json:"id" binding:"required"`
+	Name     string `form:"name" json:"name" binding:"required"`
+	Location string `form:"location" json:"location" binding:"required"`
 }
 
 func main() {
@@ -66,8 +78,11 @@ func main() {
 	r := gin.Default()
 	r.GET("/", indexGet)
 	r.POST("/", indexPost)
+
 	r.GET("/devices", devicesGet)
 	r.POST("/devices", devicesPost)
+	r.PUT("/devices", devicesPut)
+	r.DELETE("/devices", devicesDelete)
 
 	log.Fatal(r.Run(":8080"))
 }
@@ -93,10 +108,9 @@ func indexGet(c *gin.Context) {
 	)
 
 	for row.Next() {
-		err = row.Scan(&id, &temperature, &humidity, &pressure)
-		if err != nil {
+		if err := row.Scan(&id, &temperature, &humidity, &pressure); err != nil {
 			c.JSON(500, gin.H{"error": "Internal server error"})
-			break
+			return
 		}
 		responseData = append(responseData, WeatherResponse{id, temperature, humidity, pressure})
 	}
@@ -167,10 +181,9 @@ func devicesGet(c *gin.Context) {
 	)
 
 	for row.Next() {
-		err = row.Scan(&id, &name, &config)
-		if err != nil {
+		if err := row.Scan(&id, &name, &config); err != nil {
 			c.JSON(500, gin.H{"error": "Internal server error"})
-			break
+			return
 		}
 		responseData = append(responseData, DeviceResponse{id, name, config, "Living room"})
 	}
@@ -184,13 +197,13 @@ func devicesGet(c *gin.Context) {
 func devicesPost(c *gin.Context) {
 	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 
-	var form DeviceForm
+	var form DevicePost
 	if err := c.ShouldBind(&form); err != nil {
 		c.JSON(400, gin.H{"error": "Bad request"})
 		return
 	}
 
-	statement, err := database.Prepare("SELECT id FROM devices WHERE uuid = ? LIMIT 1;")
+	statement, _ := database.Prepare("SELECT id FROM devices WHERE uuid = ? LIMIT 1;")
 	row, err := statement.Query(form.Uuid)
 	if err != nil {
 		fmt.Println("Error checking if device exists")
@@ -200,17 +213,19 @@ func devicesPost(c *gin.Context) {
 
 	if row.Next() {
 		var id int
-		err = row.Scan(&id)
-		if err != nil {
+		if err := row.Scan(&id); err != nil {
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			return
 		}
 	} else {
-		// Todo: Use json encoder
-		config := fmt.Sprintf("{\"address\": \"%s\", \"version\": \"%s\"}", form.Address, form.Version)
+		config, err := json.Marshal(DeviceConfig{form.Version, form.Address})
+		if err != nil {
+			c.JSON(500, gin.H{"error": "Internal server error"})
+			return
+		}
 
 		statement, _ = database.Prepare("INSERT INTO devices (uuid, name, config) VALUES (?, ?, ?);")
-		_, err = statement.Exec(form.Uuid, form.Name, config)
+		_, err = statement.Exec(form.Uuid, form.Name, string(config))
 		if err != nil {
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			return
@@ -219,6 +234,50 @@ func devicesPost(c *gin.Context) {
 
 	_ = statement.Close()
 	_ = row.Close()
+
+	c.JSON(200, ":3")
+}
+
+func devicesPut(c *gin.Context) {
+	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+
+	var form DevicePut
+	if err := c.ShouldBind(&form); err != nil {
+		c.JSON(400, gin.H{"error": "Bad request"})
+		return
+	}
+
+	statement, _ := database.Prepare("UPDATE devices SET name = ? WHERE id = ?;")
+	_, err := statement.Exec(form.Name, form.Id)
+	if err != nil {
+		fmt.Println(err)
+		c.JSON(500, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	_ = statement.Close()
+
+	c.JSON(200, ":3")
+}
+
+func devicesDelete(c *gin.Context) {
+	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+
+	id, err := strconv.Atoi(c.Query("id"))
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Bad request"})
+		return
+	}
+
+	statement, _ := database.Prepare("DELETE FROM devices WHERE id = ?;")
+	_, err = statement.Exec(id)
+	if err != nil {
+		fmt.Println(err)
+		c.JSON(500, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	_ = statement.Close()
 
 	c.JSON(200, ":3")
 }
