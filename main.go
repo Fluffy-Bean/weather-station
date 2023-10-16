@@ -76,8 +76,13 @@ func main() {
 
 	// Run HTTP server
 	r := gin.Default()
-	r.GET("/", indexGet)
-	r.POST("/", indexPost)
+	r.Static("/static", "./public/static")
+	r.LoadHTMLGlob("public/*.html")
+
+	r.GET("/", indexPage)
+
+	r.GET("/weather", weatherGet)
+	r.POST("/weather", weatherPost)
 
 	r.GET("/devices", devicesGet)
 	r.POST("/devices", devicesPost)
@@ -87,7 +92,12 @@ func main() {
 	log.Fatal(r.Run(":8080"))
 }
 
-func indexGet(c *gin.Context) {
+func indexPage(c *gin.Context) {
+	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+	c.HTML(200, "index.html", nil)
+}
+
+func weatherGet(c *gin.Context) {
 	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 
 	statement, err := database.Prepare("SELECT id, temperature, humidity, pressure FROM weather ORDER BY created_at DESC;")
@@ -121,7 +131,7 @@ func indexGet(c *gin.Context) {
 	c.JSON(200, responseData)
 }
 
-func indexPost(c *gin.Context) {
+func weatherPost(c *gin.Context) {
 	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 
 	var form WeatherForm
