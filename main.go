@@ -10,6 +10,8 @@ import (
 	"strconv"
 )
 
+const version = "0.0.1"
+
 var database *sql.DB
 
 type WeatherResponse struct {
