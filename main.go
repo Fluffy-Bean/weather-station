@@ -1,18 +1,49 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 	"log"
 	"strconv"
 )
 
-const version = "0.0.1"
+const version = "0.0.2"
 
-var database *sql.DB
+var database *sqlx.DB
+var schema = `
+CREATE TABLE IF NOT EXISTS weather (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    temperature REAL,
+    humidity REAL,
+    pressure REAL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT,
+    name TEXT,
+    config TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+`
+
+type Weather struct {
+	Id          int     `json:"id"`
+	Temperature float64 `json:"temperature"`
+	Humidity    float64 `json:"humidity"`
+	Pressure    float64 `json:"pressure"`
+	CreatedAt   string  `json:"created_at" db:"created_at"`
+}
+type Device struct {
+	Id        int    `json:"id"`
+	Uuid      string `json:"uuid"`
+	Name      string `json:"name"`
+	Config    string `json:"config"`
+	CreatedAt string `json:"created_at" db:"created_at"`
+}
 
 type WeatherResponse struct {
 	Id          int     `json:"id"`
@@ -28,10 +59,10 @@ type WeatherForm struct {
 }
 
 type DeviceResponse struct {
-	Id       int    `json:"id"`
-	Name     string `json:"name"`
-	Config   string `json:"config"`
-	Location string `json:"location"`
+	Id       int          `json:"id"`
+	Name     string       `json:"name"`
+	Config   DeviceConfig `json:"config"`
+	Location string       `json:"location"`
 }
 type DeviceConfig struct {
 	Version string `json:"version"`
@@ -49,32 +80,18 @@ type DevicePut struct {
 	Location string `form:"location" json:"location" binding:"required"`
 }
 
+type ServerResponse struct {
+	Version string `json:"version"`
+	Uptime  string `json:"uptime"`
+}
+
 func main() {
 	var err error
-	database, err = sql.Open("sqlite3", "./weather.db")
+	database, err = sqlx.Open("sqlite3", "./weather.db")
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// Make Weather table
-	statement, _ := database.Prepare("CREATE TABLE IF NOT EXISTS weather (id INTEGER PRIMARY KEY AUTOINCREMENT, temperature REAL, humidity REAL, pressure REAL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);")
-	if err != nil {
-		log.Fatal(err)
-	}
-	_, _ = statement.Exec()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Make Devices table
-	statement, err = database.Prepare("CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT, name TEXT, config TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);")
-	if err != nil {
-		log.Fatal(err)
-	}
-	_, err = statement.Exec()
-	if err != nil {
-		log.Fatal(err)
-	}
+	database.MustExec(schema)
 
 	// Run HTTP server
 	r := gin.Default()
@@ -82,6 +99,8 @@ func main() {
 	r.LoadHTMLGlob("public/*.html")
 
 	r.GET("/", indexPage)
+
+	r.GET("/health", healthGet)
 
 	r.GET("/weather", weatherGet)
 	r.POST("/weather", weatherPost)
@@ -95,47 +114,31 @@ func main() {
 }
 
 func indexPage(c *gin.Context) {
-	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 	c.HTML(200, "index.html", nil)
 }
 
+func healthGet(c *gin.Context) {
+	c.JSON(200, ServerResponse{version, "0"})
+}
+
 func weatherGet(c *gin.Context) {
-	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+	var weather []Weather
 
-	statement, err := database.Prepare("SELECT id, temperature, humidity, pressure FROM weather ORDER BY created_at DESC;")
-	if err != nil {
-		c.JSON(500, gin.H{"error": "Internal server error"})
-		return
-	}
-	row, err := statement.Query()
+	err := database.Select(&weather, "SELECT id, temperature, humidity, pressure, created_at FROM weather ORDER BY created_at DESC;")
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Internal server error"})
 		return
 	}
 
-	var (
-		responseData                    []WeatherResponse
-		id                              int
-		temperature, humidity, pressure float64
-	)
-
-	for row.Next() {
-		if err := row.Scan(&id, &temperature, &humidity, &pressure); err != nil {
-			c.JSON(500, gin.H{"error": "Internal server error"})
-			return
-		}
-		responseData = append(responseData, WeatherResponse{id, temperature, humidity, pressure})
+	var weatherResponse []WeatherResponse
+	for i := range weather {
+		weatherResponse = append(weatherResponse, WeatherResponse{weather[i].Id, weather[i].Temperature, weather[i].Humidity, weather[i].Pressure})
 	}
 
-	_ = statement.Close()
-	_ = row.Close()
-
-	c.JSON(200, responseData)
+	c.JSON(200, weatherResponse)
 }
 
 func weatherPost(c *gin.Context) {
-	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-
 	var form WeatherForm
 	if err := c.ShouldBind(&form); err != nil {
 		fmt.Println("Error binding form")
@@ -143,153 +146,100 @@ func weatherPost(c *gin.Context) {
 		return
 	}
 
-	statement, err := database.Prepare("SELECT id FROM devices WHERE uuid = ? LIMIT 1;")
-	row, err := statement.Query(form.Uuid)
+	var device Device
+	err := database.Get(&device, "SELECT uuid FROM devices WHERE uuid = ? LIMIT 1;", form.Uuid)
 	if err != nil {
-		fmt.Println("Error checking if device exists")
-		c.JSON(500, gin.H{"error": "Internal server error"})
-		return
-	}
-	if !row.Next() {
 		fmt.Println("Device does not exist" + form.Uuid)
 		c.JSON(403, gin.H{"error": "Device does not exist, check in first"})
 		return
 	}
 
-	_ = statement.Close()
-	_ = row.Close()
-
-	statement, _ = database.Prepare("INSERT INTO weather (temperature, humidity, pressure) VALUES (?, ?, ?);")
-	_, err = statement.Exec(form.Temperature, form.Humidity, form.Pressure)
+	_, err = database.Exec("INSERT INTO weather (temperature, humidity, pressure) VALUES (:temperature, :humidity, :pressure);", form)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Internal server error"})
 		return
 	}
 
-	_ = statement.Close()
-	_ = row.Close()
-
-	c.JSON(200, WeatherResponse{0, form.Temperature, form.Humidity, form.Pressure})
+	c.JSON(200, ":3")
 }
 
 func devicesGet(c *gin.Context) {
-	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-
-	statement, err := database.Prepare("SELECT id, name, config FROM devices;")
-	if err != nil {
-		c.JSON(500, gin.H{"error": "Internal server error"})
-		return
-	}
-	row, err := statement.Query()
+	var devices []Device
+	err := database.Select(&devices, "SELECT id, name, config, created_at FROM devices ORDER BY created_at DESC;")
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Internal server error"})
 		return
 	}
 
-	var (
-		responseData []DeviceResponse
-		id           int
-		name, config string
-	)
-
-	for row.Next() {
-		if err := row.Scan(&id, &name, &config); err != nil {
+	var deviceResponse []DeviceResponse
+	var config DeviceConfig
+	for i := range devices {
+		if err := json.Unmarshal([]byte(devices[i].Config), &config); err != nil {
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			return
 		}
-		responseData = append(responseData, DeviceResponse{id, name, config, "Living room"})
+		deviceResponse = append(deviceResponse, DeviceResponse{devices[i].Id, devices[i].Name, config, "Living room"})
 	}
 
-	_ = statement.Close()
-	_ = row.Close()
-
-	c.JSON(200, responseData)
+	c.JSON(200, deviceResponse)
 }
 
 func devicesPost(c *gin.Context) {
-	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-
 	var form DevicePost
 	if err := c.ShouldBind(&form); err != nil {
 		c.JSON(400, gin.H{"error": "Bad request"})
 		return
 	}
 
-	statement, _ := database.Prepare("SELECT id FROM devices WHERE uuid = ? LIMIT 1;")
-	row, err := statement.Query(form.Uuid)
+	var devices []Device
+	err := database.Get(&devices, "SELECT * FROM devices WHERE uuid = ?;", form.Uuid)
 	if err != nil {
-		fmt.Println("Error checking if device exists")
-		c.JSON(500, gin.H{"error": "Internal server error"})
-		return
-	}
-
-	if row.Next() {
-		var id int
-		if err := row.Scan(&id); err != nil {
-			c.JSON(500, gin.H{"error": "Internal server error"})
-			return
-		}
-	} else {
 		config, err := json.Marshal(DeviceConfig{form.Version, form.Address})
 		if err != nil {
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			return
 		}
 
-		statement, _ = database.Prepare("INSERT INTO devices (uuid, name, config) VALUES (?, ?, ?);")
-		_, err = statement.Exec(form.Uuid, form.Name, string(config))
+		_, err = database.Exec("INSERT INTO devices (uuid, name, config) VALUES (?, ?, ?);", form.Uuid, form.Name, string(config))
 		if err != nil {
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			return
 		}
 	}
 
-	_ = statement.Close()
-	_ = row.Close()
-
 	c.JSON(200, ":3")
 }
 
 func devicesPut(c *gin.Context) {
-	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-
 	var form DevicePut
 	if err := c.ShouldBind(&form); err != nil {
 		c.JSON(400, gin.H{"error": "Bad request"})
 		return
 	}
 
-	statement, _ := database.Prepare("UPDATE devices SET name = ? WHERE id = ?;")
-	_, err := statement.Exec(form.Name, form.Id)
+	_, err := database.Exec("UPDATE devices SET name = ? WHERE id = ?;", form.Name, form.Id)
 	if err != nil {
 		fmt.Println(err)
 		c.JSON(500, gin.H{"error": "Internal server error"})
 		return
 	}
 
-	_ = statement.Close()
-
 	c.JSON(200, ":3")
 }
 
 func devicesDelete(c *gin.Context) {
-	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-
 	id, err := strconv.Atoi(c.Query("id"))
 	if err != nil {
 		c.JSON(400, gin.H{"error": "Bad request"})
 		return
 	}
 
-	statement, _ := database.Prepare("DELETE FROM devices WHERE id = ?;")
-	_, err = statement.Exec(id)
+	_, err = database.Exec("DELETE FROM devices WHERE id = ?;", id)
 	if err != nil {
 		fmt.Println(err)
 		c.JSON(500, gin.H{"error": "Internal server error"})
 		return
 	}
-
-	_ = statement.Close()
 
 	c.JSON(200, ":3")
 }
