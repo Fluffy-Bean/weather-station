@@ -10,24 +10,34 @@ import (
 	"strconv"
 )
 
-const version = "0.0.2"
+const version = "0.0.3"
 
 var database *sqlx.DB
 var schema = `
 CREATE TABLE IF NOT EXISTS weather (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    temperature REAL,
-    humidity REAL,
-    pressure REAL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    temperature REAL NOT NULL,
+    humidity REAL NOT NULL,
+    pressure REAL NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 CREATE TABLE IF NOT EXISTS devices (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uuid TEXT,
-    name TEXT,
-    config TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    uuid TEXT NOT NULL,
+    name TEXT NOT NULL,
+    config TEXT NOT NULL,
+    room_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    FOREIGN KEY (room_id) REFERENCES rooms(id)
 );
+CREATE TABLE IF NOT EXISTS rooms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    name TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+-- if nothing in rooms, add default location
+INSERT INTO rooms (name) SELECT 'Living room' WHERE NOT EXISTS (SELECT 1 FROM rooms);
 `
 
 type Weather struct {
@@ -42,7 +52,19 @@ type Device struct {
 	Uuid      string `json:"uuid"`
 	Name      string `json:"name"`
 	Config    string `json:"config"`
+	Room      string `json:"room"`
+	RoomId    int    `json:"room_id" db:"room_id"`
 	CreatedAt string `json:"created_at" db:"created_at"`
+}
+type Room struct {
+	Id        int    `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at" db:"created_at"`
+}
+
+type ServerResponse struct {
+	Version string `json:"version"`
+	Uptime  string `json:"uptime"`
 }
 
 type WeatherResponse struct {
@@ -59,10 +81,11 @@ type WeatherForm struct {
 }
 
 type DeviceResponse struct {
-	Id       int          `json:"id"`
-	Name     string       `json:"name"`
-	Config   DeviceConfig `json:"config"`
-	Location string       `json:"location"`
+	Id     int          `json:"id"`
+	Name   string       `json:"name"`
+	Room   string       `json:"room"`
+	RoomId int          `json:"room_id"`
+	Config DeviceConfig `json:"config"`
 }
 type DeviceConfig struct {
 	Version string `json:"version"`
@@ -75,25 +98,30 @@ type DevicePost struct {
 	Address string `form:"address" json:"address" binding:"required"`
 }
 type DevicePut struct {
-	Id       int    `form:"id" json:"id" binding:"required"`
-	Name     string `form:"name" json:"name" binding:"required"`
-	Location string `form:"location" json:"location" binding:"required"`
+	Id   int    `form:"id" json:"id" binding:"required"`
+	Name string `form:"name" json:"name" binding:"required"`
+	Room string `form:"room" json:"room" binding:"required"`
 }
 
-type ServerResponse struct {
-	Version string `json:"version"`
-	Uptime  string `json:"uptime"`
+type RoomResponse struct {
+	Id          int    `json:"id"`
+	Name        string `json:"name"`
+	DeviceCount int    `json:"device_count" db:"device_count"`
+}
+type RoomPost struct {
+	Id   int    `form:"id" json:"id" binding:"required"`
+	Name string `form:"name" json:"name" binding:"required"`
 }
 
 func main() {
 	var err error
+
 	database, err = sqlx.Open("sqlite3", "./weather.db")
 	if err != nil {
 		log.Fatal(err)
 	}
 	database.MustExec(schema)
 
-	// Run HTTP server
 	r := gin.Default()
 	r.Static("/static", "./public/static")
 	r.LoadHTMLGlob("public/*.html")
@@ -109,6 +137,11 @@ func main() {
 	r.POST("/devices", devicesPost)
 	r.PUT("/devices", devicesPut)
 	r.DELETE("/devices", devicesDelete)
+
+	r.GET("/rooms", roomsGet)
+	r.POST("/rooms", roomsPost)
+	r.PUT("/rooms", roomsPut)
+	r.DELETE("/rooms", roomsDelete)
 
 	log.Fatal(r.Run(":8080"))
 }
@@ -164,9 +197,18 @@ func weatherPost(c *gin.Context) {
 }
 
 func devicesGet(c *gin.Context) {
-	var devices []Device
-	err := database.Select(&devices, "SELECT id, name, config, created_at FROM devices ORDER BY created_at DESC;")
+	var rooms []Room
+	err := database.Select(&rooms, "SELECT * FROM rooms;")
 	if err != nil {
+		fmt.Println(err)
+		c.JSON(500, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	var devices []Device
+	err = database.Select(&devices, "SELECT d.id, d.name, d.config, r.name as room, d.room_id, d.created_at FROM devices as d LEFT JOIN rooms as r ON d.room_id = r.id ORDER BY d.created_at DESC;")
+	if err != nil {
+		fmt.Println(err)
 		c.JSON(500, gin.H{"error": "Internal server error"})
 		return
 	}
@@ -175,13 +217,14 @@ func devicesGet(c *gin.Context) {
 	var config DeviceConfig
 	for i := range devices {
 		if err := json.Unmarshal([]byte(devices[i].Config), &config); err != nil {
+			fmt.Println(err)
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			return
 		}
-		deviceResponse = append(deviceResponse, DeviceResponse{devices[i].Id, devices[i].Name, config, "Living room"})
+		deviceResponse = append(deviceResponse, DeviceResponse{devices[i].Id, devices[i].Name, devices[i].Room, devices[i].RoomId, config})
 	}
 
-	c.JSON(200, deviceResponse)
+	c.JSON(200, gin.H{"devices": deviceResponse, "rooms": rooms})
 }
 
 func devicesPost(c *gin.Context) {
@@ -217,7 +260,7 @@ func devicesPut(c *gin.Context) {
 		return
 	}
 
-	_, err := database.Exec("UPDATE devices SET name = ? WHERE id = ?;", form.Name, form.Id)
+	_, err := database.Exec("UPDATE devices SET name = ?, room_id = ? WHERE id = ?;", form.Name, form.Room, form.Id)
 	if err != nil {
 		fmt.Println(err)
 		c.JSON(500, gin.H{"error": "Internal server error"})
@@ -235,6 +278,76 @@ func devicesDelete(c *gin.Context) {
 	}
 
 	_, err = database.Exec("DELETE FROM devices WHERE id = ?;", id)
+	if err != nil {
+		fmt.Println(err)
+		c.JSON(500, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	c.JSON(200, ":3")
+}
+
+func roomsGet(c *gin.Context) {
+	var roomResponse []RoomResponse
+	err := database.Select(&roomResponse, "SELECT r.id, r.name, count(d.id) as device_count from rooms as r left join devices as d on d.room_id = r.id group by r.id")
+	if err != nil {
+		fmt.Println(err)
+		c.JSON(500, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	c.JSON(200, roomResponse)
+}
+
+func roomsPost(c *gin.Context) {
+	name := c.PostForm("name")
+	if name == "" {
+		c.JSON(400, gin.H{"error": "Bad request"})
+		return
+	}
+
+	_, err := database.Exec("INSERT INTO rooms (name) VALUES (?);", name)
+	if err != nil {
+		fmt.Println(err)
+		c.JSON(500, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	c.JSON(200, ":3")
+}
+
+func roomsPut(c *gin.Context) {
+	var form RoomPost
+	if err := c.ShouldBind(&form); err != nil {
+		c.JSON(400, gin.H{"error": "Bad request"})
+		return
+	}
+
+	_, err := database.Exec("UPDATE rooms SET name = ? WHERE id = ?;", form.Name, form.Id)
+	if err != nil {
+		fmt.Println(err)
+		c.JSON(500, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	c.JSON(200, ":3")
+}
+
+func roomsDelete(c *gin.Context) {
+	id, err := strconv.Atoi(c.Query("id"))
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Bad request"})
+		return
+	}
+
+	_, err = database.Exec("DELETE FROM rooms WHERE id = ?;", id)
+	if err != nil {
+		fmt.Println(err)
+		c.JSON(500, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	_, err = database.Exec("UPDATE devices SET room_id = NULL WHERE room_id = ?;", id)
 	if err != nil {
 		fmt.Println(err)
 		c.JSON(500, gin.H{"error": "Internal server error"})
