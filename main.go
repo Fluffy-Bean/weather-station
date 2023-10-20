@@ -48,13 +48,12 @@ type Weather struct {
 	CreatedAt   string  `json:"created_at" db:"created_at"`
 }
 type Device struct {
-	Id        int    `json:"id"`
-	Uuid      string `json:"uuid"`
-	Name      string `json:"name"`
-	Config    string `json:"config"`
-	Room      string `json:"room"`
-	RoomId    int    `json:"room_id" db:"room_id"`
-	CreatedAt string `json:"created_at" db:"created_at"`
+	Id        int     `json:"id"`
+	Uuid      string  `json:"uuid"`
+	Name      string  `json:"name"`
+	Config    string  `json:"config"`
+	RoomId    *string `json:"room_id" db:"room_id"`
+	CreatedAt string  `json:"created_at" db:"created_at"`
 }
 type Room struct {
 	Id        int    `json:"id"`
@@ -80,13 +79,6 @@ type WeatherForm struct {
 	Pressure    float64 `form:"pressure" json:"pressure" binding:"required"`
 }
 
-type DeviceResponse struct {
-	Id     int          `json:"id"`
-	Name   string       `json:"name"`
-	Room   string       `json:"room"`
-	RoomId int          `json:"room_id"`
-	Config DeviceConfig `json:"config"`
-}
 type DeviceConfig struct {
 	Version string `json:"version"`
 	Address string `json:"address"`
@@ -206,14 +198,14 @@ func devicesGet(c *gin.Context) {
 	}
 
 	var devices []Device
-	err = database.Select(&devices, "SELECT d.id, d.name, d.config, r.name as room, d.room_id, d.created_at FROM devices as d LEFT JOIN rooms as r ON d.room_id = r.id ORDER BY d.created_at DESC;")
+	err = database.Select(&devices, "SELECT * FROM devices ORDER BY room_id, created_at DESC;")
 	if err != nil {
 		fmt.Println(err)
 		c.JSON(500, gin.H{"error": "Internal server error"})
 		return
 	}
 
-	var deviceResponse []DeviceResponse
+	var deviceResponse []gin.H
 	var config DeviceConfig
 	for i := range devices {
 		if err := json.Unmarshal([]byte(devices[i].Config), &config); err != nil {
@@ -221,7 +213,13 @@ func devicesGet(c *gin.Context) {
 			c.JSON(500, gin.H{"error": "Internal server error"})
 			return
 		}
-		deviceResponse = append(deviceResponse, DeviceResponse{devices[i].Id, devices[i].Name, devices[i].Room, devices[i].RoomId, config})
+		response := gin.H{
+			"id":      devices[i].Id,
+			"name":    devices[i].Name,
+			"room_id": devices[i].RoomId,
+			"config":  config,
+		}
+		deviceResponse = append(deviceResponse, response)
 	}
 
 	c.JSON(200, gin.H{"devices": deviceResponse, "rooms": rooms})
